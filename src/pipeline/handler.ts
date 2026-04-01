@@ -499,76 +499,87 @@ export async function handleInbound(
 
   const dynamicSystemPrompt = config.systemPrompt + soulBlock + userBlock + memoryBlock + dynamicContext + thinkingInstruction;
 
-  // Begin streaming
-  const streamHandle = channel.beginStream?.(msg.chatId);
-
+  // Begin streaming — tự động retry khi server overloaded (429/529)
+  let overloadAttempt = 0;
+  const MAX_OVERLOAD_RETRIES = 3;
   let fullText = "";
+
   try {
-    for await (const event of aiClient.stream({
-      history,
-      userMessage: msg.text,
-      imageBase64,
-      imageMimeType,
-      model: selectedModel,
-      maxTokens: config.maxTokens,
-      systemPrompt: dynamicSystemPrompt,
-      signal: controller.signal,
-      toolHandler,
-    })) {
-      if (controller.signal.aborted) break;
+    while (true) {
+      const streamHandle = channel.beginStream?.(msg.chatId);
+      fullText = "";
 
-      if (event.type === "delta") {
-        fullText = event.fullText ?? fullText;
-        streamHandle?.update(fullText);
-      } else if (event.type === "done") {
-        fullText = event.fullText ?? fullText;
-      } else if (event.type === "error") {
-        throw event.error;
-      }
-    }
+      try {
+        for await (const event of aiClient.stream({
+          history,
+          userMessage: msg.text,
+          imageBase64,
+          imageMimeType,
+          model: selectedModel,
+          maxTokens: config.maxTokens,
+          systemPrompt: dynamicSystemPrompt,
+          signal: controller.signal,
+          toolHandler,
+        })) {
+          if (controller.signal.aborted) break;
 
-    if (controller.signal.aborted) {
-      await streamHandle?.abort();
-      return;
-    }
+          if (event.type === "delta") {
+            fullText = event.fullText ?? fullText;
+            streamHandle?.update(fullText);
+          } else if (event.type === "done") {
+            fullText = event.fullText ?? fullText;
+          } else if (event.type === "error") {
+            throw event.error;
+          }
+        }
 
-    await streamHandle?.finalize();
-  } catch (err) {
-    const isAbort =
-      err instanceof Error &&
-      (err.name === "AbortError" || err.message.includes("abort"));
+        if (controller.signal.aborted) {
+          await streamHandle?.abort();
+          return;
+        }
 
-    if (!isAbort) {
-      console.error("[pipeline] AI error:", err);
-    }
+        await streamHandle?.finalize();
+        break; // thành công — thoát retry loop
 
-    await streamHandle?.abort();
+      } catch (err) {
+        const isAbort =
+          err instanceof Error &&
+          (err.name === "AbortError" || err.message.includes("abort"));
 
-    if (!isAbort) {
-      const isOverloaded =
-        err instanceof Error && err.message.includes("overloaded_error");
+        if (isAbort) {
+          await streamHandle?.abort();
+          return;
+        }
 
-      if (isOverloaded) {
-        // Retry sau 5 giây
+        console.error("[pipeline] AI error:", err);
+        await streamHandle?.abort();
+
+        const isOverloaded =
+          err instanceof Error && (
+            err.message.includes("overloaded_error") ||
+            err.message.toLowerCase().includes("overloaded") ||
+            (err as any).status === 529
+          );
+
+        if (isOverloaded && overloadAttempt < MAX_OVERLOAD_RETRIES) {
+          overloadAttempt++;
+          const delayMs = overloadAttempt * 5000; // 5s → 10s → 15s
+          console.warn(`[pipeline] Overloaded, retry ${overloadAttempt}/${MAX_OVERLOAD_RETRIES} in ${delayMs / 1000}s`);
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
+        }
+
         await channel.send({
           channel: msg.channel,
           chatId: msg.chatId,
-          text: "Server Anthropic đang quá tải, thử lại sau 5 giây...",
+          text: isOverloaded
+            ? "Server Anthropic đang quá tải, vui lòng thử lại sau ít phút."
+            : "Có lỗi xảy ra, vui lòng thử lại.",
           isFinal: true,
         });
-        await new Promise((r) => setTimeout(r, 5000));
-        await handleInbound(msg, deps, opts);
         return;
       }
-
-      await channel.send({
-        channel: msg.channel,
-        chatId: msg.chatId,
-        text: "Có lỗi xảy ra, vui lòng thử lại.",
-        isFinal: true,
-      });
     }
-    return;
   } finally {
     deregisterStream(msg.chatId);
   }

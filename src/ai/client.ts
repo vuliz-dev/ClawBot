@@ -30,23 +30,35 @@ function readOAuthToken(): string | null {
     const raw = fs.readFileSync(CREDENTIALS_PATH, "utf8");
     const data = JSON.parse(raw) as Record<string, { accessToken?: string; expiresAt?: number }>;
 
+    const now = Date.now();
     let bestToken: string | null = null;
     let latestExpiry = 0;
+    let fallbackToken: string | null = null;
+    let fallbackExpiry = 0;
 
     for (const val of Object.values(data)) {
       if (val?.accessToken?.startsWith("sk-ant-oat")) {
-        // Ưu tiên token còn hạn dài nhất
         const expiry = val.expiresAt ?? 0;
-        if (!bestToken || expiry > latestExpiry) {
-          bestToken = val.accessToken;
-          latestExpiry = expiry;
+        // Ưu tiên token còn hạn (với buffer 60s)
+        if (expiry === 0 || expiry > now + 60_000) {
+          if (!bestToken || expiry > latestExpiry) {
+            bestToken = val.accessToken;
+            latestExpiry = expiry;
+          }
+        } else {
+          // Giữ làm fallback nếu tất cả token đều hết hạn
+          if (!fallbackToken || expiry > fallbackExpiry) {
+            fallbackToken = val.accessToken;
+            fallbackExpiry = expiry;
+          }
         }
       }
     }
 
-    _cachedToken = bestToken;
+    const selected = bestToken ?? fallbackToken;
+    _cachedToken = selected;
     _cachedMtime = mtime;
-    return bestToken;
+    return selected;
   } catch {
     return null;
   }
@@ -116,9 +128,11 @@ export class AnthropicClient implements AIClient {
     const system = this.isOAuth
       ? [
           { type: "text" as const, text: "You are Claude Code, Anthropic's official CLI for Claude." },
-          { type: "text" as const, text: req.systemPrompt },
+          { type: "text" as const, text: req.systemPrompt, cache_control: { type: "ephemeral" as const } },
         ]
-      : req.systemPrompt;
+      : [
+          { type: "text" as const, text: req.systemPrompt, cache_control: { type: "ephemeral" as const } },
+        ];
 
     let fullText = "";
 
@@ -145,6 +159,11 @@ export class AnthropicClient implements AIClient {
       }
 
       const finalMsg = await stream1.finalMessage();
+
+      const u = finalMsg.usage as any;
+      if (u.cache_read_input_tokens || u.cache_creation_input_tokens) {
+        console.log(`[cache] read=${u.cache_read_input_tokens ?? 0} write=${u.cache_creation_input_tokens ?? 0} normal=${u.input_tokens}`);
+      }
 
       if (finalMsg.stop_reason === "tool_use" && req.toolHandler) {
         const toolResults: Anthropic.ToolResultBlockParam[] = [];
@@ -186,7 +205,8 @@ export class AnthropicClient implements AIClient {
       // Auto-refresh: nếu lỗi 401 (token hết hạn), invalidate cache và retry 1 lần
       const isAuthError =
         err instanceof Error &&
-        (err.message.includes("401") ||
+        ((err as any).status === 401 ||
+          err.message.includes("401") ||
           err.message.includes("authentication") ||
           err.message.includes("unauthorized") ||
           err.message.toLowerCase().includes("token"));
