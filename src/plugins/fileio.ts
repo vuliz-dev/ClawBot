@@ -199,39 +199,90 @@ export async function writeFile(workspaceDir: string, filePath: string, content:
   }
 }
 
+const SKIP_DIRS = new Set([
+  "node_modules", ".git", ".svn", "__pycache__", ".next", "dist", "build",
+  ".cache", "coverage", "vendor", "venv", ".venv", "env", ".env",
+]);
+
 /**
- * Liệt kê nội dung thư mục trong workspace.
+ * Đệ quy xây dựng cây thư mục dạng text.
  */
-export function listDir(workspaceDir: string, dirPath: string = "."): string {
-  let resolved: string;
+function buildTree(dirPath: string, prefix: string, depth: number, maxDepth: number): string[] {
+  if (depth > maxDepth) return [];
+  let entries: fs.Dirent[];
   try {
-    resolved = safePath(workspaceDir, dirPath);
-  } catch (e) {
-    return String(e instanceof Error ? e.message : e);
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return [];
   }
 
-  // Nếu workspace chưa tồn tại, tạo nó
+  // Thư mục trước, file sau; bỏ qua các thư mục nặng
+  const dirs = entries.filter((e) => e.isDirectory() && !SKIP_DIRS.has(e.name));
+  const files = entries.filter((e) => !e.isDirectory());
+
+  const lines: string[] = [];
+  const all = [...dirs, ...files];
+
+  for (let i = 0; i < all.length; i++) {
+    const e = all[i]!;
+    const isLast = i === all.length - 1;
+    const connector = isLast ? "└── " : "├── ";
+    const childPrefix = isLast ? prefix + "    " : prefix + "│   ";
+
+    if (e.isDirectory()) {
+      lines.push(`${prefix}${connector}${e.name}/`);
+      lines.push(...buildTree(path.join(dirPath, e.name), childPrefix, depth + 1, maxDepth));
+    } else {
+      try {
+        const size = fs.statSync(path.join(dirPath, e.name)).size;
+        const sizeStr = size > 1048576 ? `${(size / 1048576).toFixed(1)}MB`
+          : size > 1024 ? `${(size / 1024).toFixed(1)}KB`
+          : `${size}B`;
+        lines.push(`${prefix}${connector}${e.name} (${sizeStr})`);
+      } catch {
+        lines.push(`${prefix}${connector}${e.name}`);
+      }
+    }
+  }
+  return lines;
+}
+
+/**
+ * Liệt kê nội dung thư mục dạng cây đệ quy.
+ * - Nếu dirPath là absolute path (ví dụ C:\Users\... hoặc /home/...) → đọc thẳng từ path đó.
+ * - Nếu là relative path → sandbox trong WORKSPACE_DIR.
+ * - depth: độ sâu đệ quy (mặc định 3).
+ */
+export function listDir(workspaceDir: string, dirPath: string = ".", depth: number = 3): string {
+  const isAbsolute = path.isAbsolute(dirPath);
+
+  let resolved: string;
+  if (isAbsolute) {
+    resolved = path.normalize(dirPath);
+  } else {
+    try {
+      resolved = safePath(workspaceDir, dirPath);
+    } catch (e) {
+      return String(e instanceof Error ? e.message : e);
+    }
+  }
+
+  // Nếu workspace chưa tồn tại, tạo nó (chỉ với relative path)
   if (!fs.existsSync(resolved)) {
-    if (dirPath === "." || dirPath === "") {
+    if (!isAbsolute && (dirPath === "." || dirPath === "")) {
       fs.mkdirSync(resolved, { recursive: true });
       return `Workspace trống: ${workspaceDir}`;
     }
-    return `Thư mục không tồn tại: ${dirPath}`;
+    return `Thư mục không tồn tại: ${resolved}`;
   }
 
-  try {
-    const entries = fs.readdirSync(resolved, { withFileTypes: true });
-    if (entries.length === 0) return `Thư mục trống: ${dirPath}`;
-
-    const lines = entries.map((e) => {
-      if (e.isDirectory()) return `📁 ${e.name}/`;
-      const size = fs.statSync(path.join(resolved, e.name)).size;
-      const sizeStr = size > 1024 ? `${(size / 1024).toFixed(1)}KB` : `${size}B`;
-      return `📄 ${e.name} (${sizeStr})`;
-    });
-
-    return `📂 ${dirPath}/\n${lines.join("\n")}`;
-  } catch (err) {
-    return `Lỗi đọc thư mục: ${err instanceof Error ? err.message : String(err)}`;
+  const stat = fs.statSync(resolved);
+  if (!stat.isDirectory()) {
+    return `"${dirPath}" là file, không phải thư mục. Dùng read_file để đọc nội dung.`;
   }
+
+  const treeLines = buildTree(resolved, "", 0, Math.min(depth, 5));
+  if (treeLines.length === 0) return `Thư mục trống: ${resolved}`;
+
+  return `${resolved}/\n${treeLines.join("\n")}`;
 }

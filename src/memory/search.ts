@@ -16,7 +16,7 @@ export interface MemoryResult {
  * Tìm kiếm keyword trong các file memory đã lưu.
  * Trả về các đoạn liên quan nhất.
  */
-export function searchMemory(query: string, memoriesDir: string): string {
+export async function searchMemory(query: string, memoriesDir: string): Promise<string> {
   if (!fs.existsSync(memoriesDir)) {
     return "Chưa có memory nào được lưu.";
   }
@@ -37,14 +37,22 @@ export function searchMemory(query: string, memoriesDir: string): string {
 
   const results: MemoryResult[] = [];
 
-  for (const file of files) {
-    const filePath = path.join(memoriesDir, file);
-    let content: string;
-    try {
-      content = fs.readFileSync(filePath, "utf8");
-    } catch {
-      continue;
-    }
+  // Giới hạn tìm kiếm trong 50 file gần nhất để tăng tốc, và đọc file song song
+  const filesToSearch = files.slice(0, 50);
+  const fileReads = await Promise.all(
+    filesToSearch.map(async (file) => {
+      try {
+        const filePath = path.join(memoriesDir, file);
+        return { file, content: await fs.promises.readFile(filePath, "utf8") };
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  for (const item of fileReads) {
+    if (!item) continue;
+    const { file, content } = item;
 
     const score = scoreContent(content, keywords);
     if (score === 0) continue;

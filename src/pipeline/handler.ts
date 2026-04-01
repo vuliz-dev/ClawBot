@@ -243,13 +243,22 @@ const TOOLS: ToolDefinition[] = [
   {
     name: "list_dir",
     description:
-      "Liệt kê nội dung thư mục trong workspace. Dùng để xem cấu trúc project.",
+      "Liệt kê cấu trúc thư mục dạng cây đệ quy. " +
+      "Hỗ trợ cả đường dẫn tuyệt đối (C:\\Users\\... hoặc /home/...) và tương đối trong workspace. " +
+      "Dùng khi user muốn xem cấu trúc project, folder, hoặc bất kỳ thư mục nào trên hệ thống. " +
+      "Tự động bỏ qua node_modules, .git, dist và các thư mục nặng.",
     input_schema: {
       type: "object",
       properties: {
         path: {
           type: "string",
-          description: "Đường dẫn thư mục tương đối, mặc định là '.' (root workspace)",
+          description:
+            "Đường dẫn thư mục. Có thể là tuyệt đối (ví dụ 'C:\\Users\\PC\\myproject' hoặc '/home/user/project') " +
+            "hoặc tương đối trong workspace (ví dụ '.' hoặc 'src'). Mặc định là '.' (workspace root).",
+        },
+        depth: {
+          type: "number",
+          description: "Độ sâu đệ quy tối đa (1-5). Mặc định 3. Dùng depth=1 để xem nhanh top-level.",
         },
       },
       required: [],
@@ -314,11 +323,15 @@ export async function handleInbound(
   // Register abort controller
   const controller = registerStream(msg.chatId);
 
-  // Helper: gửi progress update liên tục — user biết clawbot đang làm gì
-  const sendProgress = async (text: string) => {
-    try {
-      await channel.send({ channel: msg.channel, chatId: msg.chatId, text, isFinal: true });
-    } catch { /* ignore */ }
+  // Ref đến stream handle hiện tại — sendProgress sẽ update vào đây thay vì gửi tin nhắn mới
+  const streamRef: { current: import("../channels/types.js").StreamHandle | null } = { current: null };
+
+  // Helper: update status vào stream message đang hiển thị
+  const sendProgress = (text: string): void => {
+    if (streamRef.current) {
+      streamRef.current.update(text);
+    }
+    // Nếu chưa có streamHandle (edge case), bỏ qua — tránh gửi tin nhắn rời
   };
 
   // Tool executor
@@ -351,7 +364,7 @@ export async function handleInbound(
         case "run_bash": {
           const command = i.command ?? "";
           const needsApproval = shouldRequireApproval(command, config.bashApprovalMode);
-          if (!needsApproval) await sendProgress(`Đang chạy: \`${command.slice(0, 80)}\``);
+          if (!needsApproval) sendProgress(`Đang chạy: \`${command.slice(0, 80)}\``);
 
           if (needsApproval) {
             if (!channel.sendApprovalMessage) {
@@ -376,21 +389,21 @@ export async function handleInbound(
         }
 
         case "fetch_url":
-          await sendProgress(`Đang đọc: ${(i.url ?? "").slice(0, 60)}...`);
+          sendProgress(`Đang đọc: ${(i.url ?? "").slice(0, 60)}...`);
           return await fetchUrl(i.url ?? "");
 
         case "web_search":
-          await sendProgress(`Đang tìm kiếm: "${i.query ?? ""}"`);
+          sendProgress(`Đang tìm kiếm: "${i.query ?? ""}"`);
           return await webSearch(i.query ?? "");
 
         case "memory_search":
-          await sendProgress(`Đang tìm trong memory: "${i.query ?? ""}"`);
-          return searchMemory(i.query ?? "", memoriesDir);
+          sendProgress(`Đang tìm trong memory: "${i.query ?? ""}"`);
+          return await searchMemory(i.query ?? "", memoriesDir);
 
         case "generate_image": {
           const prompt = i.prompt ?? "";
           const size = (i.size as "1024x1024" | "1792x1024" | "1024x1792") ?? "1024x1024";
-          await sendProgress(`Đang tạo ảnh: "${prompt.slice(0, 60)}"...`);
+          sendProgress(`Đang tạo ảnh: "${prompt.slice(0, 60)}"...`);
           try {
             const result = await generateImage(prompt, config.imageApiKey, size);
             await channel.sendPhoto?.(msg.chatId, result.buffer, undefined);
@@ -401,12 +414,12 @@ export async function handleInbound(
         }
 
         case "read_file":
-          await sendProgress(`Đang đọc file: ${i.path ?? ""}`);
+          sendProgress(`Đang đọc file: ${i.path ?? ""}`);
           return readFile(config.workspaceDir, i.path ?? "");
 
         case "write_file": {
           const filePath = i.path ?? "";
-          await sendProgress(`Đang tạo file: ${filePath}`);
+          sendProgress(`Đang tạo file: ${filePath}`);
           const result = await writeFile(config.workspaceDir, filePath, i.content ?? "");
           // Nếu ghi thành công, gửi file thật cho user
           if (result.startsWith("✅") && channel.sendFileBuffer) {
@@ -422,9 +435,12 @@ export async function handleInbound(
           return result;
         }
 
-        case "list_dir":
-          await sendProgress(`Đang xem thư mục: ${i.path ?? "."}`);
-          return listDir(config.workspaceDir, i.path ?? ".");
+        case "list_dir": {
+          const dirPath = i.path ?? ".";
+          const dirDepth = i.depth ? parseInt(i.depth) : 3;
+          sendProgress(`Đang xem cấu trúc: ${dirPath}`);
+          return listDir(config.workspaceDir, dirPath, dirDepth);
+        }
 
         case "export_chat": {
           const turns = sessionManager.getHistory(sessionKey);
@@ -448,19 +464,21 @@ export async function handleInbound(
   // ─── Load soul/user/memory files ────────────────────────────────────────────
   const dataDir = path.dirname(config.dbPath);
 
-  function safeRead(filePath: string): string {
-    try { return fs.readFileSync(filePath, "utf8"); } catch { return ""; }
+  async function safeRead(filePath: string): Promise<string> {
+    try { return await fs.promises.readFile(filePath, "utf8"); } catch { return ""; }
   }
 
   // Chỉ load 2000 ký tự đầu mỗi file để tránh system prompt quá nặng
-  const safeReadTrimmed = (filePath: string, maxChars = 2000): string => {
-    const content = safeRead(filePath);
+  const safeReadTrimmed = async (filePath: string, maxChars = 2000): Promise<string> => {
+    const content = await safeRead(filePath);
     return content.length > maxChars ? content.slice(0, maxChars) + "\n...(truncated)" : content;
   };
 
-  const soulContent = safeReadTrimmed(path.join(dataDir, "soul.md"), 800);
-  const userContent = safeReadTrimmed(path.join(dataDir, "user.md"), 800);
-  const memoryContent = safeReadTrimmed(path.join(dataDir, "memory.md"), 1200);
+  const [soulContent, userContent, memoryContent] = await Promise.all([
+    safeReadTrimmed(path.join(dataDir, "soul.md"), 800),
+    safeReadTrimmed(path.join(dataDir, "user.md"), 800),
+    safeReadTrimmed(path.join(dataDir, "memory.md"), 1200)
+  ]);
 
   // ─── Build dynamic system prompt với context thời gian thực ────────────────
   const now = new Date();
@@ -506,7 +524,8 @@ export async function handleInbound(
 
   try {
     while (true) {
-      const streamHandle = channel.beginStream?.(msg.chatId);
+      const streamHandle = channel.beginStream?.(msg.chatId) ?? null;
+      streamRef.current = streamHandle;
       fullText = "";
 
       try {

@@ -120,8 +120,20 @@ export class AnthropicClient implements AIClient {
         ]
       : req.userMessage;
 
+    // Build history — thêm cache_control vào message cuối của history để cache prefix hội thoại
+    const historyMsgs: AnthropicMsgParam[] = req.history.map((m, i) => {
+      const isLast = i === req.history.length - 1;
+      if (isLast && typeof m.content === "string" && m.content.length > 0) {
+        return {
+          role: m.role as AnthropicMsgParam["role"],
+          content: [{ type: "text" as const, text: m.content, cache_control: { type: "ephemeral" as const } }],
+        };
+      }
+      return { role: m.role, content: m.content } as AnthropicMsgParam;
+    });
+
     const messages: AnthropicMsgParam[] = [
-      ...req.history.map((m) => ({ role: m.role, content: m.content } as AnthropicMsgParam)),
+      ...historyMsgs,
       { role: "user", content: userContent },
     ];
 
@@ -149,55 +161,65 @@ export class AnthropicClient implements AIClient {
         ...(anthropicTools.length ? { tools: anthropicTools } : {}),
       } as Parameters<typeof client.messages.stream>[0];
 
-      const stream1 = client.messages.stream(params, reqOptions);
+      // Agentic loop — hỗ trợ nhiều vòng tool use liên tiếp
+      const MAX_TOOL_ROUNDS = 10;
+      let currentMessages = messages;
+      let round = 0;
 
-      for await (const event of stream1) {
-        if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-          fullText += event.delta.text;
-          yield { type: "delta", delta: event.delta.text, fullText };
-        }
-      }
-
-      const finalMsg = await stream1.finalMessage();
-
-      const u = finalMsg.usage as any;
-      if (u.cache_read_input_tokens || u.cache_creation_input_tokens) {
-        console.log(`[cache] read=${u.cache_read_input_tokens ?? 0} write=${u.cache_creation_input_tokens ?? 0} normal=${u.input_tokens}`);
-      }
-
-      if (finalMsg.stop_reason === "tool_use" && req.toolHandler) {
-        const toolResults: Anthropic.ToolResultBlockParam[] = [];
-
-        for (const block of finalMsg.content) {
-          if (block.type === "tool_use") {
-            const result = await req.toolHandler.execute(block.name, block.input);
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: block.id,
-              content: result,
-            });
-          }
-        }
-
-        const messages2: AnthropicMsgParam[] = [
-          ...messages,
-          { role: "assistant", content: finalMsg.content as AnthropicMsgParam["content"] },
-          { role: "user", content: toolResults as AnthropicMsgParam["content"] },
-        ];
-
+      while (round < MAX_TOOL_ROUNDS) {
+        round++;
         fullText = "";
 
-        const stream2 = client.messages.stream(
-          { model: req.model, max_tokens: req.maxTokens, system, messages: messages2 },
+        const stream = client.messages.stream(
+          { ...params, messages: currentMessages },
           reqOptions
         );
 
-        for await (const event of stream2) {
+        for await (const event of stream) {
           if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
             fullText += event.delta.text;
             yield { type: "delta", delta: event.delta.text, fullText };
           }
         }
+
+        const finalMsg = await stream.finalMessage();
+
+        const u = finalMsg.usage as any;
+        if (u.cache_read_input_tokens || u.cache_creation_input_tokens) {
+          console.log(`[cache] read=${u.cache_read_input_tokens ?? 0} write=${u.cache_creation_input_tokens ?? 0} normal=${u.input_tokens}`);
+        }
+
+        if (finalMsg.stop_reason !== "tool_use" || !req.toolHandler) {
+          // Không còn tool call — kết thúc
+          break;
+        }
+
+        // Thực thi tất cả tool calls trong round này
+        const toolUseBlocks = finalMsg.content.filter((b) => b.type === "tool_use");
+        const toolResults: Anthropic.ToolResultBlockParam[] = await Promise.all(
+          toolUseBlocks.map(async (block) => {
+            const result = await req.toolHandler!.execute(block.name, block.input);
+            return {
+              type: "tool_result" as const,
+              tool_use_id: block.id,
+              content: result,
+            };
+          })
+        );
+
+        // Thêm cache_control vào tool result cuối để cache context đang tích luỹ
+        const cachedToolResults = toolResults.map((r, i) =>
+          i === toolResults.length - 1
+            ? { ...r, cache_control: { type: "ephemeral" as const } }
+            : r
+        );
+
+        // Append assistant + tool results vào conversation rồi tiếp tục
+        currentMessages = [
+          ...currentMessages,
+          { role: "assistant", content: finalMsg.content as AnthropicMsgParam["content"] },
+          { role: "user", content: cachedToolResults as AnthropicMsgParam["content"] },
+        ];
       }
 
       yield { type: "done", fullText };

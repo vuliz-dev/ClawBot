@@ -36,7 +36,8 @@ export class SessionManager {
 
   /**
    * Cắt bớt lịch sử từ đầu nếu tổng token vượt quá maxContextTokens.
-   * Luôn giữ lại cặp turn cuối cùng để tránh mất ngữ cảnh gần nhất.
+   * Xóa theo cặp (user + assistant) để giữ đúng alternation pattern.
+   * Luôn giữ lại ít nhất 2 turns cuối.
    */
   private pruneByTokens(messages: MessageParam[]): MessageParam[] {
     const budget = this.maxContextTokens * CHARS_PER_TOKEN; // chars
@@ -45,11 +46,15 @@ export class SessionManager {
 
     if (totalChars <= budget) return messages;
 
-    // Xóa từ đầu (cũ nhất) cho đến khi vừa ngân sách, giữ ít nhất 2 turns cuối
     const result = [...messages];
+    // Xóa 2 messages mỗi lần (1 cặp user+assistant) để không phá vỡ alternation
     while (result.length > 2 && totalChars > budget) {
-      const removed = result.shift()!;
-      totalChars -= removed.content.length;
+      const first = result.shift()!;
+      totalChars -= first.content.length;
+      if (result.length > 2) {
+        const second = result.shift()!;
+        totalChars -= second.content.length;
+      }
     }
 
     return result;
