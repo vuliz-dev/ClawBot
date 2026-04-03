@@ -37,6 +37,7 @@ export interface AIRequest {
   imageMimeType?: string;
   model: string;
   maxTokens: number;
+  thinkingBudgetTokens?: number;
   systemPrompt: string;
   signal?: AbortSignal;
   toolHandler?: ToolHandler;

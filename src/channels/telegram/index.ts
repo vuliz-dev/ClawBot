@@ -191,6 +191,33 @@ export class TelegramChannel implements IChannel {
     const chunks = chunkText(msg.text);
     let lastId: string | undefined;
 
+    // Handle Edit Message Update Phase
+    if (msg.editMessageId && chunks.length > 0) {
+      try {
+        await this.bot.api.editMessageText(
+          Number(msg.chatId),
+          Number(msg.editMessageId),
+          formatForTelegram(chunks[0]),
+          { parse_mode: "MarkdownV2" }
+        );
+        return msg.editMessageId;
+      } catch (err: any) {
+        // If edit fails (e.g., text hasn't changed), ignore and don't spam a new send
+        if (err?.description?.includes("message is not modified")) {
+          return msg.editMessageId;
+        }
+        try {
+          await this.bot.api.editMessageText(
+            Number(msg.chatId),
+            Number(msg.editMessageId),
+            chunks[0]
+          );
+          return msg.editMessageId;
+        } catch { } // Error fallback -> will proceed to send new.
+      }
+    }
+
+    // Default New Message Send Phase
     for (const chunk of chunks) {
       try {
         const result = await this.bot.api.sendMessage(

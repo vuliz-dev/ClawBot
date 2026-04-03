@@ -36,6 +36,18 @@ const DANGEROUS_PATTERNS = [
   /wget.*\|\s*(bash|sh|zsh)/i,
   /:\(\)\s*\{/,             // fork bomb
   /chmod\s+[0-7]*7[0-7]*\s+\//i,
+  // Windows PowerShell Core Threats
+  /Remove-Item(\s+-Recurse|\s+-Force|\s+-Confirm|\s+-\w+)*\s+([A-Za-z]:[\\/]|\\)/i,
+  /Invoke-WebRequest|iwr\s+/i,
+  /Invoke-RestMethod|irm\s+/i,
+  /Set-ExecutionPolicy/i,
+  /Stop-Process|taskkill/i,
+  /net\s+user/i,
+  /Start-Process.*-Verb\s+RunAs/i,
+  /Set-ItemProperty.*HKLM/i,
+  /New-ItemProperty/i,
+  /Remove-ItemProperty/i,
+  /Clear-ItemProperty/i,
 ];
 
 function isDangerous(command: string): boolean {
@@ -421,14 +433,27 @@ export async function handleInbound(
   // Register abort controller
   const controller = registerStream(msg.chatId);
 
-  // Helper: Gửi duy nhất 1 tin nhắn biểu tượng đồng hồ cát để báo hiệu đang xử lý
+  // Helper: Hiển thị tiến trình UI rõ ràng giúp người dùng hết cảm giác bị mù (Blind UX)
   let progressMsgId: string | undefined;
   const sendProgress = async (text?: string) => {
     try {
       if (!progressMsgId) {
-        progressMsgId = await channel.send({ channel: msg.channel, chatId: msg.chatId, text: `⏳ Đang xử lý...`, isFinal: false });
+        progressMsgId = await channel.send({ 
+          channel: msg.channel, 
+          chatId: msg.chatId, 
+          text: `⏳ Đang xử lý...`, 
+          isFinal: false 
+        });
+      } else if (text && channel.send) {
+        // Cập nhật trạng thái Tool thật sự để User có thể đọc thay vì "Không update text nữa"
+        await channel.send({ 
+          channel: msg.channel, 
+          chatId: msg.chatId, 
+          text: `⏳ ${text}`, 
+          isFinal: false, 
+          editMessageId: progressMsgId 
+        });
       }
-      // Không update text nữa theo yêu cầu của user, chỉ hiện đồng hồ cát cho đến khi có kết quả
     } catch { /* ignore */ }
   };
 
@@ -659,13 +684,7 @@ export async function handleInbound(
   const selectedModel = selectModel(complexity, config.model);
   console.log(`[router] complexity=${complexity} model=${selectedModel} msg="${msg.text.slice(0, 40)}..."`);
 
-  // Với câu phức tạp, inject thêm instruction để Claude suy nghĩ có cấu trúc
-  // Với câu phức tạp: nhắc Claude áp dụng structured reasoning
-  const thinkingInstruction = complexity === "complex"
-    ? "\n\n[COMPLEX QUERY] Ap dung structured reasoning: 1) Phan tich yeu cau thuc su 2) Chon approach tot nhat 3) Thuc hien co cau truc 4) Kiem tra lai truoc khi output."
-    : "";
-
-  const dynamicSystemPrompt = config.systemPrompt + soulBlock + userBlock + memoryBlock + dynamicContext + thinkingInstruction;
+  const dynamicSystemPrompt = config.systemPrompt + soulBlock + userBlock + memoryBlock + dynamicContext;
 
   // Begin streaming — tự động retry khi server overloaded (529)
   let overloadAttempt = 0;
@@ -678,6 +697,10 @@ export async function handleInbound(
       const streamHandle = channel.beginStream?.(msg.chatId);
       fullText = "";
 
+      // Áp dụng Controller mới cho từng lượt Retry (Tối đa 60s/lượt để tránh lỗi Treo Chết)
+      const loopController = new AbortController();
+      const enforceTimeout = setTimeout(() => { loopController.abort("Quá thời gian phản hồi (Hard Timeout API)"); }, 60000);
+
       try {
         for await (const event of aiClient.stream({
           history,
@@ -686,11 +709,12 @@ export async function handleInbound(
           imageMimeType,
           model: selectedModel,
           maxTokens: config.maxTokens,
+          thinkingBudgetTokens: complexity === "complex" ? config.thinkingBudgetTokens : undefined,
           systemPrompt: dynamicSystemPrompt,
-          signal: controller.signal,
+          signal: loopController.signal,
           toolHandler,
         })) {
-          if (controller.signal.aborted) break;
+          if (loopController.signal.aborted) break;
 
           if (event.type === "delta") {
             fullText = event.fullText ?? fullText;
@@ -748,6 +772,8 @@ export async function handleInbound(
           isFinal: true,
         });
         return;
+      } finally {
+        clearTimeout(enforceTimeout);
       }
     }
   } finally {

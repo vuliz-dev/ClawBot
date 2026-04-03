@@ -139,9 +139,18 @@ export class AnthropicClient implements AIClient {
       const MAX_STEPS = 25;
 
       for (let step = 0; step < MAX_STEPS; step++) {
+        let finalMaxTokens = req.maxTokens;
+        let thinkingOptions: any = undefined;
+        
+        if (req.thinkingBudgetTokens && req.thinkingBudgetTokens >= 1024) {
+           thinkingOptions = { type: "enabled", budget_tokens: req.thinkingBudgetTokens };
+           finalMaxTokens = Math.max(req.maxTokens, req.thinkingBudgetTokens + 4000); // Đảm bảo output có không gian trả lời sau khi ngốn đống budget để suy nghĩ
+        }
+
         const params = {
           model: req.model,
-          max_tokens: req.maxTokens,
+          max_tokens: finalMaxTokens,
+          ...(thinkingOptions ? { thinking: thinkingOptions } : {}),
           system,
           messages: currentMessages,
           ...(anthropicTools.length ? { tools: anthropicTools } : {}),

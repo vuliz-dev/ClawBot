@@ -25,6 +25,7 @@ const schema = z.object({
   // ── Model ─────────────────────────────────────────────────────────────────
   CLAUDE_MODEL: z.string().default("claude-sonnet-4-6"),
   CLAUDE_MAX_TOKENS: z.coerce.number().default(8192),
+  THINKING_BUDGET_TOKENS: z.coerce.number().default(4096),
 
   // ── System ────────────────────────────────────────────────────────────────
   SYSTEM_PROMPT: z.string().default(""),  // nếu trống, dùng DEFAULT_SYSTEM_PROMPT bên dưới
@@ -47,6 +48,7 @@ const schema = z.object({
   // ── Exec approval ─────────────────────────────────────────────────────────
   // "always" = luôn hỏi | "never" = không hỏi (trust AI) | "smart" = chỉ hỏi lệnh nguy hiểm
   BASH_APPROVAL_MODE: z.enum(["always", "never", "smart"]).default("smart"),
+  ALLOW_HOST_BASH: z.enum(["true", "false"]).default("false"),
 
   // ── Gateway WebSocket ──────────────────────────────────────────────────────
   // Nếu set, /ws endpoint yêu cầu ?token=<WS_SECRET> để kết nối
@@ -129,6 +131,7 @@ export const config = {
   // Model
   model: parsed.data.CLAUDE_MODEL,
   maxTokens: parsed.data.CLAUDE_MAX_TOKENS,
+  thinkingBudgetTokens: parsed.data.THINKING_BUDGET_TOKENS,
 
   // System
   systemPrompt: parsed.data.SYSTEM_PROMPT || DEFAULT_SYSTEM_PROMPT,
@@ -147,6 +150,7 @@ export const config = {
   pairingCode: parsed.data.PAIRING_CODE,
   bashTimeoutMs: parsed.data.BASH_TIMEOUT_MS,
   bashApprovalMode: parsed.data.BASH_APPROVAL_MODE,
+  allowHostBash: parsed.data.ALLOW_HOST_BASH === "true",
 
   // Image generation
   imageApiKey: parsed.data.IMAGE_API_KEY || parsed.data.OPENAI_API_KEY || "",

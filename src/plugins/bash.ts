@@ -1,6 +1,7 @@
 import { isDockerReady, runInSandbox } from "./sandbox.js";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { config } from "../config/env.js";
 
 const execAsync = promisify(exec);
 
@@ -14,6 +15,9 @@ export async function runBash(
 
   if (dockerReady) {
     return await runInSandbox(command, workspaceDir, timeoutMs);
+  }
+  if (!config.allowHostBash) {
+    return "⚠️ ❌ Lỗi Bảo mật: Tính năng chạy lệnh Bash thẳng trên máy chủ (Host Bash) đã bị vô hiệu hóa để bảo vệ an toàn hệ thống. Hãy cài đặt Docker môi trường ảo hoặc cấu hình ALLOW_HOST_BASH=true !";
   }
 
   // Fallback to local execution if Docker is not available

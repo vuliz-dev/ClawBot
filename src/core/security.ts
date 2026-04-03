@@ -10,6 +10,7 @@ interface IPairingState {
 
 export class SecurityManager {
   private whitelistedUsers = new Set<string>();
+  private lockouts = new Map<string, { attempts: number; lockUntil: number }>();
   private whitelistPath: string;
 
   constructor() {
@@ -50,6 +51,17 @@ export class SecurityManager {
    * Nếu user nhắn tin chứa mã Pairing Code hợp lệ, họ sẽ được cấp quyền vĩnh viễn.
    */
   public checkAccess(userId: string, incomingText: string): IPairingState {
+    const now = Date.now();
+    const lockout = this.lockouts.get(userId);
+    if (lockout && lockout.lockUntil > now) {
+      const remainMins = Math.ceil((lockout.lockUntil - now) / 60000);
+      return { isAllowed: false, message: `⛔ BẠN ĐÃ BỊ KHOÁ MÕM! Nhập sai quá nhiều lần. Vui lòng thử lại sau ${remainMins} phút.` };
+    }
+
+    if (lockout && lockout.lockUntil <= now) {
+      this.lockouts.delete(userId);
+    }
+
     // 1. Phân quyền cốt lõi (Hard-Block Mode): Nếu ko điền ALLOWED_USER và ko điền PAIRING, CHẶN SẠCH!
     if (config.allowedUserIds.length === 0 && !config.pairingCode) {
       if (this.whitelistedUsers.has(userId)) return { isAllowed: true };
@@ -70,6 +82,7 @@ export class SecurityManager {
     // 4. Nếu họ nhập đúng Pairing Code
     if (incomingText.trim() === config.pairingCode) {
       this.whitelistedUsers.add(userId);
+      this.lockouts.delete(userId);
       this.saveWhitelist();
       return { 
         isAllowed: true, 
@@ -79,9 +92,17 @@ export class SecurityManager {
     }
 
     // 5. Nếu họ nhập sai hoặc nhắn tin bình thường
+    const currentAttempts = (this.lockouts.get(userId)?.attempts || 0) + 1;
+    if (currentAttempts >= 5) {
+      this.lockouts.set(userId, { attempts: currentAttempts, lockUntil: now + 15 * 60 * 1000 });
+      return { isAllowed: false, message: "⛔ Bạn đã bị khóa 15 phút do nhập sai mã 5 lần liên tiếp để chống Brute-force." };
+    } else {
+      this.lockouts.set(userId, { attempts: currentAttempts, lockUntil: 0 });
+    }
+
     return { 
       isAllowed: false, 
-      message: "🔒 Hệ thống đang khoá. Vui lòng nhập mã PIN ghép nối (Pairing Code) để trò chuyện:" 
+      message: `🔒 Hệ thống đang khoá. Vui lòng nhập mã PIN ghép nối để trò chuyện (Bạn đã nhập sai ${currentAttempts}/5 lần):` 
     };
   }
 }
