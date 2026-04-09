@@ -32,6 +32,7 @@ async function main() {
     anthropicApiKey: config.anthropicApiKey,
     openaiApiKey: config.openaiApiKey,
     openaiBaseUrl: config.openaiBaseUrl,
+    googleApiKey: config.googleApiKey,
   });
   console.log(`[clawbot] ai provider: ${config.aiProvider}`);
 

@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: clawbot
+    runtime: docker
+    plan: standard
+
+    # Build config
+    dockerfilePath: ./Dockerfile
+
+    # Environment - you'll set these in Render dashboard
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false  # Synced from render dashboard
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: AI_PROVIDER
+        value: anthropic
+      - key: GATEWAY_PORT
+        value: 3000
+      - key: DB_PATH
+        value: /app/data/clawbot.db
+      - key: WORKSPACE_DIR
+        value: /app/workspace
+      - key: MAX_CONTEXT_TOKENS
+        value: 80000
+      - key: BASH_APPROVAL_MODE
+        value: smart
+
+    # Port
+    port: 3000
+
+    # Auto-deploy on push
+    autoDeploy: true
+
+    # Health check
+    healthCheckPath: /
+
+    # Build and start
+    buildCommand: npm run build
+    startCommand: npm start

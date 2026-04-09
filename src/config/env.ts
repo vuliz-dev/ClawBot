@@ -5,8 +5,8 @@ const schema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(1),
 
   // ── AI Provider ────────────────────────────────────────────────────────────
-  // "anthropic" (default) | "openai" | "ollama"
-  AI_PROVIDER: z.enum(["anthropic", "openai", "ollama"]).default("anthropic"),
+  // "anthropic" (default) | "openai" | "ollama" | "google"
+  AI_PROVIDER: z.enum(["anthropic", "openai", "ollama", "google"]).default("anthropic"),
 
   // Anthropic
   ANTHROPIC_API_KEY: z.string().default("auto"),
@@ -14,6 +14,9 @@ const schema = z.object({
   // OpenAI / Ollama
   OPENAI_API_KEY: z.string().default(""),
   OPENAI_BASE_URL: z.string().default(""),  // e.g. http://localhost:11434/v1 for Ollama
+
+  // Google Generative AI
+  GOOGLE_API_KEY: z.string().default(""),
 
   // Image generation (Hugging Face) — token miễn phí tại huggingface.co/settings/tokens
   // Nếu không set, generate_image tool sẽ báo không khả dụng
@@ -133,6 +136,7 @@ export const config = {
   anthropicApiKey: parsed.data.ANTHROPIC_API_KEY,
   openaiApiKey: parsed.data.OPENAI_API_KEY,
   openaiBaseUrl: parsed.data.OPENAI_BASE_URL || undefined,
+  googleApiKey: parsed.data.GOOGLE_API_KEY,
 
   // Model
   model: parsed.data.CLAUDE_MODEL,
